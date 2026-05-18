@@ -429,7 +429,7 @@ def main():
     st.markdown(
         "<h2 style='text-align:center;color:#1a4f8a;margin-bottom:0'>🗳️ 2026 Kentucky Democratic Senate Primary</h2>"
         "<p style='text-align:center;color:#666;font-size:13px;margin-top:4px'>"
-        "Amy McGrath (AM) vs Charles Booker (CB) · Live Results via KY Secretary of State</p>",
+        "McGrath · Booker · Stevenson · Romans · Forsythe · Blanton · Thompson · Live Results via KY Secretary of State</p>",
         unsafe_allow_html=True
     )
 
