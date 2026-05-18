@@ -605,6 +605,71 @@ def main():
             use_container_width=True, hide_index=True, height=600
         )
 
+    # ── Excel Export ─────────────────────────
+    st.divider()
+    st.markdown(header_html("📥 Export Results to Excel"), unsafe_allow_html=True)
+
+    def build_excel_export(summary, s_100, demo_rows, county_df):
+        import io
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+            # Sheet 1 — Statewide Summary
+            summary_data = {
+                "Metric": ["Counties Reporting", "Counties Complete", "Counties Not Started",
+                            "Total Votes", "McGrath (AM) %", "Booker (CB) %", "Other %", "Margin (AM-CB)"],
+                "Value": [
+                    f"{summary['counties_reporting'] + summary['counties_complete']} / 120",
+                    summary['counties_complete'],
+                    summary['counties_not_started'],
+                    summary['total_votes'],
+                    f"{summary['am_pct']}%",
+                    f"{summary['cb_pct']}%",
+                    f"{summary['other_pct']}%",
+                    f"{summary['margin']}%",
+                ]
+            }
+            pd.DataFrame(summary_data).to_excel(writer, sheet_name="Statewide Summary", index=False)
+
+            # Sheet 2 — 100% Reported Counties Only
+            if s_100 and s_100["total_votes"] > 0:
+                complete_data = {
+                    "Metric": ["Total Votes", "McGrath (AM) %", "Booker (CB) %", "Other %", "Margin (AM-CB)"],
+                    "Value": [s_100["total_votes"], f"{s_100['am_pct']}%",
+                               f"{s_100['cb_pct']}%", f"{s_100['other_pct']}%", f"{s_100['margin']}%"]
+                }
+                pd.DataFrame(complete_data).to_excel(writer, sheet_name="100pct Complete Only", index=False)
+
+            # Sheet 3 — Demographics
+            if demo_rows:
+                demo_export = [{
+                    "Category": r["CATEGORY"],
+                    "Threshold": r["THRESHOLD"],
+                    "Total Votes": r["Total"],
+                    "AM %": r["AM"],
+                    "CB %": r["CB"],
+                    "Other %": r["Other"],
+                    "Margin": r["MARGIN"],
+                } for r in demo_rows]
+                pd.DataFrame(demo_export).to_excel(writer, sheet_name="Demographics", index=False)
+
+            # Sheet 4 — County Detail
+            county_export = county_df[["COUNTY","% Reporting","AM %","CB %","Other %","AM Votes","CB Votes","Total"]].copy()
+            county_export["Other Votes"] = county_export["Total"] - county_export["AM Votes"] - county_export["CB Votes"]
+            county_export.to_excel(writer, sheet_name="County Detail", index=False)
+
+        return output.getvalue()
+
+    col_exp, _ = st.columns([1, 3])
+    with col_exp:
+        excel_data = build_excel_export(summary, s_100, demo_rows, county_df)
+        st.download_button(
+            label="📊 Download Excel Snapshot",
+            data=excel_data,
+            file_name=f"ky_primary_{datetime.now().strftime('%Y%m%d_%I%M%p')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
     # ── Footer / auto-refresh ────────────────
     st.divider()
     st.markdown(
