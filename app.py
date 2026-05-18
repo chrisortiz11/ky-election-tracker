@@ -370,49 +370,43 @@ def summary_table_html(label, summary, total_votes):
     COLORS = {
         "McGrath":   LIGHT_BLUE,
         "Booker":    ORANGE,
-        "Stevenson": "#5a7a5a",
-        "Romans":    "#7a5a7a",
-        "Forsythe":  "#5a7a7a",
-        "Blanton":   "#7a7a5a",
-        "Thompson":  "#7a5a5a",
+        "Stevenson": "#4a8a4a",
+        "Romans":    "#8a4a8a",
+        "Forsythe":  "#4a8a8a",
+        "Blanton":   "#8a8a4a",
+        "Thompson":  "#8a4a4a",
     }
     rows_html = ""
     for k in CAND_KEYS:
         votes = summary.get(f"total_{k}", 0)
         pct   = summary.get(f"pct_{k}", 0.0)
         color = COLORS.get(k, "#555")
-        rows_html += f"""
-        <tr>
-          <td style="padding:5px 12px;font-weight:bold;color:{color};">{k}</td>
-          <td style="padding:5px 12px;text-align:right;color:{color};font-weight:bold;">{pct}%</td>
-          <td style="padding:5px 12px;text-align:right;">{votes:,}</td>
-        </tr>"""
+        rows_html += (
+            f'<tr><td style="padding:5px 12px;font-weight:bold;color:{color};">{k}</td>'
+            f'<td style="padding:5px 12px;text-align:right;color:{color};font-weight:bold;">{pct}%</td>'
+            f'<td style="padding:5px 12px;text-align:right;">{votes:,}</td></tr>'
+        )
     margin = summary.get("margin", 0)
     margin_str = f"+{margin}%" if margin >= 0 else f"{margin}%"
     lead = "McGrath leads" if margin > 0 else ("Booker leads" if margin < 0 else "Tied")
-    return f"""
-<table style="width:100%;max-width:480px;border-collapse:collapse;font-size:13px;border:1px solid #ccc;margin-bottom:8px;">
-  <thead>
-    <tr style="background:#555;color:white;">
-      <th style="padding:6px 12px;text-align:left;">{label}</th>
-      <th style="padding:6px 12px;text-align:right;">Share</th>
-      <th style="padding:6px 12px;text-align:right;">Votes</th>
-    </tr>
-  </thead>
-  <tbody>
-    {rows_html}
-    <tr style="background:#eee;font-weight:bold;">
-      <td style="padding:5px 12px;">TOTAL</td>
-      <td style="padding:5px 12px;text-align:right;"></td>
-      <td style="padding:5px 12px;text-align:right;">{total_votes:,}</td>
-    </tr>
-    <tr style="background:#dde;">
-      <td style="padding:5px 12px;font-weight:bold;">MARGIN (McGrath−Booker)</td>
-      <td style="padding:5px 12px;text-align:right;font-weight:bold;">{margin_str}</td>
-      <td style="padding:5px 12px;color:#666;">{lead}</td>
-    </tr>
-  </tbody>
-</table>"""
+    html = (
+        f'<table style="width:100%;max-width:500px;border-collapse:collapse;font-size:13px;border:1px solid #ccc;margin-bottom:8px;">'
+        f'<thead><tr style="background:#555;color:white;">'
+        f'<th style="padding:6px 12px;text-align:left;">{label}</th>'
+        f'<th style="padding:6px 12px;text-align:right;">Share</th>'
+        f'<th style="padding:6px 12px;text-align:right;">Votes</th>'
+        f'</tr></thead><tbody>{rows_html}'
+        f'<tr style="background:#eee;font-weight:bold;">'
+        f'<td style="padding:5px 12px;">TOTAL</td>'
+        f'<td style="padding:5px 12px;"></td>'
+        f'<td style="padding:5px 12px;text-align:right;">{total_votes:,}</td></tr>'
+        f'<tr style="background:#dde;">'
+        f'<td style="padding:5px 12px;font-weight:bold;">MARGIN (McGrath−Booker)</td>'
+        f'<td style="padding:5px 12px;text-align:right;font-weight:bold;">{margin_str}</td>'
+        f'<td style="padding:5px 12px;color:#666;">{lead}</td></tr>'
+        f'</tbody></table>'
+    )
+    return html
 
 # ─────────────────────────────────────────────
 # MAIN APP
