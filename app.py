@@ -21,9 +21,17 @@ AUTO_REFRESH  = 90          # seconds between auto-refreshes
 MAX_WORKERS   = 20          # parallel county fetches
 REQUEST_TIMEOUT = 12
 
-CAND_AM   = "Amy McGRATH"   # Amy McGrath → "AM"
-CAND_CB   = "Charles BOOKER"  # Charles Booker → "CB"
-OTHER_SURNAMES = ["STEVENSON", "ROMANS", "FORSYTHE", "BLANTON", "THOMPSON"]
+# All 7 DEM candidates: (regex pattern, display label)
+CANDIDATES = [
+    (r'Amy\s+McGRATH',                       "McGrath"),
+    (r'Charles\s+BOOKER',                    "Booker"),
+    (r'Pamela\s+STEVENSON',                  "Stevenson"),
+    (r'Dale\s+(?:Lewis\s+)?ROMANS',          "Romans"),
+    (r'Logan\s+FORSYTHE',                    "Forsythe"),
+    (r'Joshua\s+\w*\s*BLANTON',             "Blanton"),
+    (r'Vincent\s+\w*\s*THOMPSON',           "Thompson"),
+]
+CAND_KEYS = [label for _, label in CANDIDATES]
 
 # ─────────────────────────────────────────────
 # COUNTY → PAGE-ID MAPPING  (alphabetical, IDs 3-122)
@@ -225,24 +233,22 @@ def parse_page(html, county_name):
     no_data = "No Data Found" in full_text
 
     # ── DEM US Senate votes ───────────────────────
-    am_votes    = extract_votes(full_text, r'Amy\s+McGRATH')
-    cb_votes    = extract_votes(full_text, r'Charles\s+BOOKER')
-    other_votes = 0
-    for surname in OTHER_SURNAMES:
-        other_votes += extract_votes(full_text, surname)
+    votes = {}
+    for pattern, label in CANDIDATES:
+        m = re.search(rf'{pattern}\s*\n?\s*(\d[\d,]*)', full_text, re.IGNORECASE)
+        votes[label] = int(m.group(1).replace(',', '')) if m else 0
 
-    total = am_votes + cb_votes + other_votes
+    total = sum(votes.values())
 
-    return {
+    result = {
         "county": county_name,
-        "am": am_votes,
-        "cb": cb_votes,
-        "other": other_votes,
         "total": total,
         "pct_reporting": pct_reporting,
         "complete": complete,
         "no_data": no_data,
     }
+    result.update(votes)
+    return result
 
 def fetch_county(county_name, county_id):
     try:
@@ -250,8 +256,10 @@ def fetch_county(county_name, county_id):
         r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
         return parse_page(r.text, county_name)
     except Exception as e:
-        return {"county": county_name, "am": 0, "cb": 0, "other": 0, "total": 0,
-                "pct_reporting": 0, "complete": False, "no_data": True, "error": str(e)}
+        row = {"county": county_name, "total": 0, "pct_reporting": 0,
+               "complete": False, "no_data": True, "error": str(e)}
+        row.update({k: 0 for k in CAND_KEYS})
+        return row
 
 @st.cache_data(ttl=AUTO_REFRESH)
 def fetch_all_counties():
@@ -272,13 +280,13 @@ def safe_pct(num, denom):
 
 def build_summary(county_data):
     """Aggregate all counties into statewide totals."""
-    total_am = total_cb = total_other = total_votes = 0
+    totals = {k: 0 for k in CAND_KEYS}
+    total_votes = 0
     reporting = complete = not_started = 0
 
     for row in county_data.values():
-        total_am    += row["am"]
-        total_cb    += row["cb"]
-        total_other += row["other"]
+        for k in CAND_KEYS:
+            totals[k] += row.get(k, 0)
         total_votes += row["total"]
         if row["pct_reporting"] >= 100:
             complete += 1
@@ -290,16 +298,16 @@ def build_summary(county_data):
     counties_in = complete + reporting
     pct_counties = round(counties_in / 120 * 100, 1)
 
-    return {
-        "total_am": total_am, "total_cb": total_cb, "total_other": total_other,
+    result = {
         "total_votes": total_votes,
-        "am_pct": safe_pct(total_am, total_votes),
-        "cb_pct": safe_pct(total_cb, total_votes),
-        "other_pct": safe_pct(total_other, total_votes),
-        "margin": round(safe_pct(total_am, total_votes) - safe_pct(total_cb, total_votes), 1),
+        "margin": round(safe_pct(totals["McGrath"], total_votes) - safe_pct(totals["Booker"], total_votes), 1),
         "counties_complete": complete, "counties_reporting": reporting,
         "counties_not_started": not_started, "pct_counties": pct_counties,
     }
+    for k in CAND_KEYS:
+        result[f"total_{k}"] = totals[k]
+        result[f"pct_{k}"] = safe_pct(totals[k], total_votes)
+    return result
 
 def build_complete_only_summary(county_data):
     """Aggregate only counties that are 100% reported."""
@@ -318,40 +326,30 @@ def build_demo_table(county_data):
     ]
     rows = []
     for label, field, threshold in DEMO_GROUPS:
-        am = cb = other = total = 0
+        totals = {k: 0 for k in CAND_KEYS}
+        total = 0
         for county, row in county_data.items():
             demos = COUNTY_DEMOS.get(county, {})
             if demos.get(field, 0) > threshold:
-                am    += row["am"]
-                cb    += row["cb"]
-                other += row["other"]
+                for k in CAND_KEYS:
+                    totals[k] += row.get(k, 0)
                 total += row["total"]
-        rows.append({
-            "CATEGORY": label,
-            "Total": f"{total:,}",
-            "AM": f"{safe_pct(am, total)}%",
-            "CB": f"{safe_pct(cb, total)}%",
-            "Other": f"{safe_pct(other, total)}%",
-            "MARGIN": f"{round(safe_pct(am, total) - safe_pct(cb, total), 1)}%",
-            "THRESHOLD": f"{threshold}%",
-            "_am_pct": safe_pct(am, total),
-            "_cb_pct": safe_pct(cb, total),
-        })
+        row_out = {"CATEGORY": label, "THRESHOLD": f"{threshold}%", "Total": f"{total:,}"}
+        for k in CAND_KEYS:
+            row_out[k] = f"{safe_pct(totals[k], total)}%"
+            row_out[f"_{k}_pct"] = safe_pct(totals[k], total)
+        row_out["MARGIN"] = f"{round(row_out['_McGrath_pct'] - row_out['_Booker_pct'], 1)}%"
+        rows.append(row_out)
     return rows
 
 def build_county_df(county_data):
     rows = []
     for county, row in sorted(county_data.items()):
-        rows.append({
-            "COUNTY": county,
-            "% Reporting": row["pct_reporting"],
-            "AM %": safe_pct(row["am"], row["total"]),
-            "CB %": safe_pct(row["cb"], row["total"]),
-            "Other %": safe_pct(row["other"], row["total"]),
-            "Total": row["total"],
-            "AM Votes": row["am"],
-            "CB Votes": row["cb"],
-        })
+        r = {"COUNTY": county, "% Reporting": row["pct_reporting"], "Total": row["total"]}
+        for k in CAND_KEYS:
+            r[f"{k} %"] = safe_pct(row.get(k, 0), row["total"])
+            r[f"{k} Votes"] = row.get(k, 0)
+        rows.append(r)
     return pd.DataFrame(rows)
 
 # ─────────────────────────────────────────────
@@ -367,33 +365,51 @@ def header_html(title, color=BLUE):
         font-weight:bold;font-size:14px;text-align:center;border-radius:4px 4px 0 0;
         margin-top:16px;">{title}</div>"""
 
-def summary_table_html(label, total_votes, am_pct, cb_pct, other_pct, margin, am_votes, cb_votes, other_votes):
+def summary_table_html(label, summary, total_votes):
+    """Vertical candidate table — all 7 candidates."""
+    COLORS = {
+        "McGrath":   LIGHT_BLUE,
+        "Booker":    ORANGE,
+        "Stevenson": "#5a7a5a",
+        "Romans":    "#7a5a7a",
+        "Forsythe":  "#5a7a7a",
+        "Blanton":   "#7a7a5a",
+        "Thompson":  "#7a5a5a",
+    }
+    rows_html = ""
+    for k in CAND_KEYS:
+        votes = summary.get(f"total_{k}", 0)
+        pct   = summary.get(f"pct_{k}", 0.0)
+        color = COLORS.get(k, "#555")
+        rows_html += f"""
+        <tr>
+          <td style="padding:5px 12px;font-weight:bold;color:{color};">{k}</td>
+          <td style="padding:5px 12px;text-align:right;color:{color};font-weight:bold;">{pct}%</td>
+          <td style="padding:5px 12px;text-align:right;">{votes:,}</td>
+        </tr>"""
+    margin = summary.get("margin", 0)
+    margin_str = f"+{margin}%" if margin >= 0 else f"{margin}%"
+    lead = "McGrath leads" if margin > 0 else ("Booker leads" if margin < 0 else "Tied")
     return f"""
-<table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #ccc;">
+<table style="width:100%;max-width:480px;border-collapse:collapse;font-size:13px;border:1px solid #ccc;margin-bottom:8px;">
   <thead>
-    <tr>
-      <th style="padding:6px 10px;background:#aaa;color:white;text-align:left;">Total</th>
-      <th style="padding:6px 10px;background:{LIGHT_BLUE};color:white;">AM</th>
-      <th style="padding:6px 10px;background:{ORANGE};color:white;">CB</th>
-      <th style="padding:6px 10px;background:{GRAY};color:white;">Other</th>
-      <th style="padding:6px 10px;background:#444;color:white;">MARGIN</th>
+    <tr style="background:#555;color:white;">
+      <th style="padding:6px 12px;text-align:left;">{label}</th>
+      <th style="padding:6px 12px;text-align:right;">Share</th>
+      <th style="padding:6px 12px;text-align:right;">Votes</th>
     </tr>
   </thead>
   <tbody>
-    <tr style="background:#f5f5f5;">
-      <td style="padding:5px 10px;text-align:left;">{label} (share)</td>
-      <td style="padding:5px 10px;text-align:center;color:{LIGHT_BLUE};font-weight:bold;">{am_pct}%</td>
-      <td style="padding:5px 10px;text-align:center;color:{ORANGE};font-weight:bold;">{cb_pct}%</td>
-      <td style="padding:5px 10px;text-align:center;">{other_pct}%</td>
-      <td style="padding:5px 10px;text-align:center;font-weight:bold;">
-        {f"+{margin}%" if margin >= 0 else f"{margin}%"}</td>
+    {rows_html}
+    <tr style="background:#eee;font-weight:bold;">
+      <td style="padding:5px 12px;">TOTAL</td>
+      <td style="padding:5px 12px;text-align:right;"></td>
+      <td style="padding:5px 12px;text-align:right;">{total_votes:,}</td>
     </tr>
-    <tr>
-      <td style="padding:5px 10px;text-align:left;">Votes</td>
-      <td style="padding:5px 10px;text-align:center;">{am_votes:,}</td>
-      <td style="padding:5px 10px;text-align:center;">{cb_votes:,}</td>
-      <td style="padding:5px 10px;text-align:center;">{other_votes:,}</td>
-      <td style="padding:5px 10px;text-align:center;">{total_votes:,} total</td>
+    <tr style="background:#dde;">
+      <td style="padding:5px 12px;font-weight:bold;">MARGIN (McGrath−Booker)</td>
+      <td style="padding:5px 12px;text-align:right;font-weight:bold;">{margin_str}</td>
+      <td style="padding:5px 12px;color:#666;">{lead}</td>
     </tr>
   </tbody>
 </table>"""
@@ -443,10 +459,10 @@ def main():
     # ── Banner numbers ───────────────────────
     b1, b2, b3, b4 = st.columns(4)
     b1.metric("Counties Reporting", f"{summary['counties_reporting'] + summary['counties_complete']} / 120")
-    b2.metric("McGrath (AM)", f"{summary['am_pct']}%", f"{summary['total_am']:,} votes")
-    b3.metric("Booker (CB)", f"{summary['cb_pct']}%", f"{summary['total_cb']:,} votes")
+    b2.metric("McGrath", f"{summary['pct_McGrath']}%", f"{summary['total_McGrath']:,} votes")
+    b3.metric("Booker", f"{summary['pct_Booker']}%", f"{summary['total_Booker']:,} votes")
     margin_val = summary['margin']
-    lead = "AM leads" if margin_val > 0 else ("CB leads" if margin_val < 0 else "Tied")
+    lead = "McGrath leads" if margin_val > 0 else ("Booker leads" if margin_val < 0 else "Tied")
     b4.metric("Margin", f"{abs(margin_val):.1f}%", lead)
 
     st.divider()
@@ -466,9 +482,7 @@ def main():
         </table>""", unsafe_allow_html=True)
 
     st.markdown(summary_table_html(
-        "Actual Reporting", summary["total_votes"],
-        summary["am_pct"], summary["cb_pct"], summary["other_pct"], summary["margin"],
-        summary["total_am"], summary["total_cb"], summary["total_other"]
+        "All Reporting Counties", summary, summary["total_votes"]
     ), unsafe_allow_html=True)
 
     # ═══════════════════════════════════════════
@@ -478,9 +492,7 @@ def main():
 
     if s_100 and s_100["total_votes"] > 0:
         st.markdown(summary_table_html(
-            "3-way (complete counties)", s_100["total_votes"],
-            s_100["am_pct"], s_100["cb_pct"], s_100["other_pct"], s_100["margin"],
-            s_100["total_am"], s_100["total_cb"], s_100["total_other"]
+            "Complete Counties Only", s_100, s_100["total_votes"]
         ), unsafe_allow_html=True)
     else:
         st.info("No counties fully reported yet.")
@@ -492,18 +504,12 @@ def main():
                    if not v["complete"] and v["pct_reporting"] < 100}
     st.markdown(header_html(f"⏳ Outstanding — {len(outstanding)} Counties Not 100% In"), unsafe_allow_html=True)
 
-    out_am = sum(v["am"] for v in outstanding.values())
-    out_cb = sum(v["cb"] for v in outstanding.values())
-    out_other = sum(v["other"] for v in outstanding.values())
     out_total = sum(v["total"] for v in outstanding.values())
 
     if out_total > 0:
+        out_summary = build_summary(outstanding)
         st.markdown(summary_table_html(
-            "Partial Counties", out_total,
-            safe_pct(out_am, out_total), safe_pct(out_cb, out_total),
-            safe_pct(out_other, out_total),
-            round(safe_pct(out_am, out_total) - safe_pct(out_cb, out_total), 1),
-            out_am, out_cb, out_other
+            "Partial Counties", out_summary, out_total
         ), unsafe_allow_html=True)
     else:
         st.markdown(f"""<table style="width:60%;border-collapse:collapse;font-size:13px;margin:4px 0;">
@@ -524,31 +530,27 @@ def main():
     if demo_rows and any(int(r["Total"].replace(",","")) > 0 for r in demo_rows):
         demo_display = []
         for r in demo_rows:
-            am_p = r["_am_pct"]
-            cb_p = r["_cb_pct"]
-            margin_d = round(am_p - cb_p, 1)
-            demo_display.append({
-                "": r["CATEGORY"],
-                "Total": r["Total"],
-                "AM": r["AM"],
-                "CB": r["CB"],
-                "Other": r["Other"],
-                "MARGIN": f"+{margin_d}%" if margin_d >= 0 else f"{margin_d}%",
-                "THRESHOLD": r["THRESHOLD"],
-            })
+            mg_p = r["_McGrath_pct"]
+            cb_p = r["_Booker_pct"]
+            margin_d = round(mg_p - cb_p, 1)
+            d = {"": r["CATEGORY"], "Total": r["Total"]}
+            for k in CAND_KEYS:
+                d[k] = r[k]
+            d["MARGIN"] = f"+{margin_d}%" if margin_d >= 0 else f"{margin_d}%"
+            demo_display.append(d)
         df_demo = pd.DataFrame(demo_display)
 
         def color_row(row):
-            am_val = float(row["AM"].replace("%",""))
-            cb_val = float(row["CB"].replace("%",""))
-            lead_am = am_val > cb_val
+            mg_val = float(row["McGrath"].replace("%",""))
+            cb_val = float(row["Booker"].replace("%",""))
+            lead_mg = mg_val > cb_val
             colors = [""] * len(row)
-            am_idx = df_demo.columns.get_loc("AM")
-            cb_idx = df_demo.columns.get_loc("CB")
+            mg_idx = df_demo.columns.get_loc("McGrath")
+            cb_idx = df_demo.columns.get_loc("Booker")
             margin_idx = df_demo.columns.get_loc("MARGIN")
-            colors[am_idx] = f"color: {LIGHT_BLUE}; font-weight: bold" if lead_am else ""
-            colors[cb_idx] = f"color: {ORANGE}; font-weight: bold" if not lead_am else ""
-            colors[margin_idx] = f"color: {LIGHT_BLUE}" if lead_am else f"color: {ORANGE}"
+            colors[mg_idx] = f"color: {LIGHT_BLUE}; font-weight: bold" if lead_mg else ""
+            colors[cb_idx] = f"color: {ORANGE}; font-weight: bold" if not lead_mg else ""
+            colors[margin_idx] = f"color: {LIGHT_BLUE}" if lead_mg else f"color: {ORANGE}"
             return colors
 
         styled = df_demo.style.apply(color_row, axis=1)
@@ -568,26 +570,24 @@ def main():
     # Percent share table (left)
     with col_tbl1:
         st.markdown(header_html("📋 Reporting by County — % Share"), unsafe_allow_html=True)
-        pct_table = county_df[["COUNTY","% Reporting","AM %","CB %","Other %","Total"]].copy()
+        pct_cols = ["COUNTY", "% Reporting"] + [f"{k} %" for k in CAND_KEYS] + ["Total"]
+        pct_table = county_df[pct_cols].copy()
+
+        fmt = {"% Reporting": "{:.1f}%", "Total": "{:,.0f}"}
+        fmt.update({f"{k} %": "{:.1f}%" for k in CAND_KEYS})
 
         def style_pct_table(df):
             def highlight(row):
                 styles = [""] * len(row)
                 if row["% Reporting"] > 0:
-                    am_idx = df.columns.get_loc("AM %")
-                    cb_idx = df.columns.get_loc("CB %")
-                    if row["AM %"] > row["CB %"]:
-                        styles[am_idx] = f"color: {LIGHT_BLUE}; font-weight: bold"
+                    mg_idx = df.columns.get_loc("McGrath %")
+                    cb_idx = df.columns.get_loc("Booker %")
+                    if row["McGrath %"] > row["Booker %"]:
+                        styles[mg_idx] = f"color: {LIGHT_BLUE}; font-weight: bold"
                     else:
                         styles[cb_idx] = f"color: {ORANGE}; font-weight: bold"
                 return styles
-            return df.style.apply(highlight, axis=1).format({
-                "% Reporting": "{:.1f}%",
-                "AM %": "{:.1f}%",
-                "CB %": "{:.1f}%",
-                "Other %": "{:.1f}%",
-                "Total": "{:,.0f}",
-            })
+            return df.style.apply(highlight, axis=1).format(fmt)
 
         st.dataframe(style_pct_table(pct_table), use_container_width=True,
                      hide_index=True, height=600)
@@ -595,13 +595,12 @@ def main():
     # Raw vote table (right)
     with col_tbl2:
         st.markdown(header_html("📋 Reporting by County — Raw Votes"), unsafe_allow_html=True)
-        votes_table = county_df[["COUNTY","AM Votes","CB Votes","Total"]].copy()
-        votes_table["Other"] = county_df["Total"] - county_df["AM Votes"] - county_df["CB Votes"]
-        votes_table = votes_table[["COUNTY","AM Votes","CB Votes","Other","Total"]]
-
+        vote_cols = ["COUNTY"] + [f"{k} Votes" for k in CAND_KEYS] + ["Total"]
+        votes_table = county_df[vote_cols].copy()
+        fmt_v = {f"{k} Votes": "{:,.0f}" for k in CAND_KEYS}
+        fmt_v["Total"] = "{:,.0f}"
         st.dataframe(
-            votes_table.style.format({"AM Votes":"{:,.0f}","CB Votes":"{:,.0f}",
-                                       "Other":"{:,.0f}","Total":"{:,.0f}"}),
+            votes_table.style.format(fmt_v),
             use_container_width=True, hide_index=True, height=600
         )
 
@@ -615,48 +614,43 @@ def main():
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
 
             # Sheet 1 — Statewide Summary
-            summary_data = {
-                "Metric": ["Counties Reporting", "Counties Complete", "Counties Not Started",
-                            "Total Votes", "McGrath (AM) %", "Booker (CB) %", "Other %", "Margin (AM-CB)"],
-                "Value": [
-                    f"{summary['counties_reporting'] + summary['counties_complete']} / 120",
-                    summary['counties_complete'],
-                    summary['counties_not_started'],
-                    summary['total_votes'],
-                    f"{summary['am_pct']}%",
-                    f"{summary['cb_pct']}%",
-                    f"{summary['other_pct']}%",
-                    f"{summary['margin']}%",
-                ]
-            }
-            pd.DataFrame(summary_data).to_excel(writer, sheet_name="Statewide Summary", index=False)
+            metrics = ["Counties Reporting", "Counties Complete", "Counties Not Started", "Total Votes"]
+            values  = [f"{summary['counties_reporting'] + summary['counties_complete']} / 120",
+                       summary['counties_complete'], summary['counties_not_started'], summary['total_votes']]
+            for k in CAND_KEYS:
+                metrics.append(f"{k} %")
+                values.append(f"{summary[f'pct_{k}']}%")
+                metrics.append(f"{k} Votes")
+                values.append(summary[f"total_{k}"])
+            metrics.append("McGrath−Booker Margin")
+            values.append(f"{summary['margin']}%")
+            pd.DataFrame({"Metric": metrics, "Value": values}).to_excel(
+                writer, sheet_name="Statewide Summary", index=False)
 
             # Sheet 2 — 100% Reported Counties Only
             if s_100 and s_100["total_votes"] > 0:
-                complete_data = {
-                    "Metric": ["Total Votes", "McGrath (AM) %", "Booker (CB) %", "Other %", "Margin (AM-CB)"],
-                    "Value": [s_100["total_votes"], f"{s_100['am_pct']}%",
-                               f"{s_100['cb_pct']}%", f"{s_100['other_pct']}%", f"{s_100['margin']}%"]
-                }
-                pd.DataFrame(complete_data).to_excel(writer, sheet_name="100pct Complete Only", index=False)
+                m2, v2 = ["Total Votes"], [s_100["total_votes"]]
+                for k in CAND_KEYS:
+                    m2.append(f"{k} %"); v2.append(f"{s_100[f'pct_{k}']}%")
+                m2.append("McGrath−Booker Margin"); v2.append(f"{s_100['margin']}%")
+                pd.DataFrame({"Metric": m2, "Value": v2}).to_excel(
+                    writer, sheet_name="100pct Complete Only", index=False)
 
             # Sheet 3 — Demographics
             if demo_rows:
-                demo_export = [{
-                    "Category": r["CATEGORY"],
-                    "Threshold": r["THRESHOLD"],
-                    "Total Votes": r["Total"],
-                    "AM %": r["AM"],
-                    "CB %": r["CB"],
-                    "Other %": r["Other"],
-                    "Margin": r["MARGIN"],
-                } for r in demo_rows]
+                demo_export = []
+                for r in demo_rows:
+                    d = {"Category": r["CATEGORY"], "Threshold": r["THRESHOLD"], "Total Votes": r["Total"]}
+                    for k in CAND_KEYS:
+                        d[f"{k} %"] = r[k]
+                    d["McGrath−Booker Margin"] = r["MARGIN"]
+                    demo_export.append(d)
                 pd.DataFrame(demo_export).to_excel(writer, sheet_name="Demographics", index=False)
 
             # Sheet 4 — County Detail
-            county_export = county_df[["COUNTY","% Reporting","AM %","CB %","Other %","AM Votes","CB Votes","Total"]].copy()
-            county_export["Other Votes"] = county_export["Total"] - county_export["AM Votes"] - county_export["CB Votes"]
-            county_export.to_excel(writer, sheet_name="County Detail", index=False)
+            export_cols = ["COUNTY", "% Reporting"] + [f"{k} %" for k in CAND_KEYS] + \
+                          [f"{k} Votes" for k in CAND_KEYS] + ["Total"]
+            county_df[export_cols].to_excel(writer, sheet_name="County Detail", index=False)
 
         return output.getvalue()
 
