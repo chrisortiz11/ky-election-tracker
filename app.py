@@ -213,7 +213,7 @@ def parse_page(html, county_name):
     no_data = False
 
     # Grab "Ballots Cast" from page header — this updates live as precincts report in
-    ballots_cast_match = re.search(r'Ballots Cast[:\s]+([\d,]+)', full_text)
+    ballots_cast_match = re.search(r'Ballots\s+Cast[^\d]*([\d,]+)', full_text, re.IGNORECASE)
     ballots_cast = int(ballots_cast_match.group(1).replace(',', '')) if ballots_cast_match else 0
 
     # Participating / Reporting precincts for complete flag
