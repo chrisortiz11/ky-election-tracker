@@ -210,27 +210,21 @@ def parse_page(html, county_name):
     # ── Precincts / reporting percentage ─────────
     pct_reporting = 0.0
     complete = False
+    no_data = False
 
-    # Pattern A: "X of Y precincts"
-    prec = re.search(r'(\d+)\s*(?:of|/)\s*(\d+)\s*[Pp]recinct', full_text)
-    if prec and int(prec.group(2)) > 0:
-        pct_reporting = round(int(prec.group(1)) / int(prec.group(2)) * 100, 1)
-        complete = (prec.group(1) == prec.group(2))
+    # Grab "Ballots Cast" from page header — this updates live as precincts report in
+    ballots_cast_match = re.search(r'Ballots Cast[:\s]+([\d,]+)', full_text)
+    ballots_cast = int(ballots_cast_match.group(1).replace(',', '')) if ballots_cast_match else 0
 
-    # Pattern B: Explicit "100%" + complete text
-    if re.search(r'100\.?0?\s*%.*[Cc]omplete', full_text):
-        pct_reporting = 100.0
-        complete = True
-
-    # Pattern C: Look for "Counties Reporting" (statewide page)
-    county_rep = re.search(r'Counties.*?Reporting.*?(\d+)\s*/\s*(\d+)', full_text, re.IGNORECASE)
-    if county_rep:
-        c_done = int(county_rep.group(1))
-        c_total = int(county_rep.group(2))
-        pct_reporting = round(c_done / c_total * 100, 1) if c_total > 0 else 0
-
-    # Pattern D: Fall back — if no "No Data Found" text, assume data present
-    no_data = "No Data Found" in full_text
+    # Participating / Reporting precincts for complete flag
+    participating = re.search(r'Participating[:\s]+(\d+)', full_text)
+    reporting_num = re.search(r'Reporting[:\s]+(\d+)', full_text)
+    if participating and reporting_num:
+        p = int(participating.group(1))
+        r = int(reporting_num.group(1))
+        complete = (p > 0 and r >= p)
+    else:
+        no_data = ballots_cast == 0
 
     # ── DEM US Senate votes ───────────────────────
     votes = {}
@@ -239,6 +233,12 @@ def parse_page(html, county_name):
         votes[label] = int(m.group(1).replace(',', '')) if m else 0
 
     total = sum(votes.values())
+
+    # % reporting = candidate votes counted so far ÷ ballots cast
+    if ballots_cast > 0:
+        pct_reporting = round(total / ballots_cast * 100, 1)
+    else:
+        pct_reporting = 0.0
 
     result = {
         "county": county_name,
