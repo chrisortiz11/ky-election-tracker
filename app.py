@@ -1,37 +1,55 @@
 """
 Kentucky 2026 Democratic Senate Primary — Live Results Tracker
-Scrapes: https://vrsws.sos.ky.gov/liveresults/County?id=N
+Data source: NPR/AP via apps.npr.org
 Run:     streamlit run app.py
 """
 
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 import pandas as pd
 import re
 import time
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-BASE_URL      = "https://vrsws.sos.ky.gov/liveresults"
-AUTO_REFRESH  = 90          # seconds between auto-refreshes
-MAX_WORKERS   = 20          # parallel county fetches
-REQUEST_TIMEOUT = 12
+COUNTIES_URL  = "https://apps.npr.org/primary-election-results-2026/data/KY_S_5_19_2026_counties.json"
+STATEWIDE_URL = "https://apps.npr.org/primary-election-results-2026/data/KY_S_5_19_2026.json"
+AUTO_REFRESH  = 60
+REQUEST_TIMEOUT = 15
 
-# All 7 DEM candidates: (regex pattern, display label)
-CANDIDATES = [
-    (r'Amy\s+McGRATH',                       "McGrath"),
-    (r'Charles\s+BOOKER',                    "Booker"),
-    (r'Pamela\s+STEVENSON',                  "Stevenson"),
-    (r'Dale\s+(?:Lewis\s+)?ROMANS',          "Romans"),
-    (r'Logan\s+FORSYTHE',                    "Forsythe"),
-    (r'Joshua\s+\w*\s*BLANTON',             "Blanton"),
-    (r'Vincent\s+\w*\s*THOMPSON',           "Thompson"),
-]
-CAND_KEYS = [label for _, label in CANDIDATES]
+CAND_KEYS = ["McGrath", "Booker", "Stevenson", "Romans", "Forsythe", "Blanton", "Thompson"]
+
+# ─────────────────────────────────────────────
+# KENTUCKY FIPS → COUNTY NAME
+# ─────────────────────────────────────────────
+KY_FIPS = {
+    "21001":"Adair","21003":"Allen","21005":"Anderson","21007":"Ballard","21009":"Barren",
+    "21011":"Bath","21013":"Bell","21015":"Boone","21017":"Bourbon","21019":"Boyd",
+    "21021":"Boyle","21023":"Bracken","21025":"Breathitt","21027":"Breckinridge","21029":"Bullitt",
+    "21031":"Butler","21033":"Caldwell","21035":"Calloway","21037":"Campbell","21039":"Carlisle",
+    "21041":"Carroll","21043":"Carter","21045":"Casey","21047":"Christian","21049":"Clark",
+    "21051":"Clay","21053":"Clinton","21055":"Crittenden","21057":"Cumberland","21059":"Daviess",
+    "21061":"Edmonson","21063":"Elliott","21065":"Estill","21067":"Fayette","21069":"Fleming",
+    "21071":"Floyd","21073":"Franklin","21075":"Fulton","21077":"Gallatin","21079":"Garrard",
+    "21081":"Grant","21083":"Graves","21085":"Grayson","21087":"Green","21089":"Greenup",
+    "21091":"Hancock","21093":"Hardin","21095":"Harlan","21097":"Harrison","21099":"Hart",
+    "21101":"Henderson","21103":"Henry","21105":"Hickman","21107":"Hopkins","21109":"Jackson",
+    "21111":"Jefferson","21113":"Jessamine","21115":"Johnson","21117":"Kenton","21119":"Knott",
+    "21121":"Knox","21123":"Larue","21125":"Laurel","21127":"Lawrence","21129":"Lee",
+    "21131":"Leslie","21133":"Letcher","21135":"Lewis","21137":"Lincoln","21139":"Livingston",
+    "21141":"Logan","21143":"Lyon","21145":"Madison","21147":"Magoffin","21149":"Marion",
+    "21151":"Marshall","21153":"Martin","21155":"Mason","21157":"McCracken","21159":"McCreary",
+    "21161":"McLean","21163":"Meade","21165":"Menifee","21167":"Mercer","21169":"Metcalfe",
+    "21171":"Monroe","21173":"Montgomery","21175":"Morgan","21177":"Muhlenberg","21179":"Nelson",
+    "21181":"Nicholas","21183":"Ohio","21185":"Oldham","21187":"Owen","21189":"Owsley",
+    "21191":"Pendleton","21193":"Perry","21195":"Pike","21197":"Powell","21199":"Pulaski",
+    "21201":"Robertson","21203":"Rockcastle","21205":"Rowan","21207":"Russell","21209":"Scott",
+    "21211":"Shelby","21213":"Simpson","21215":"Spencer","21217":"Taylor","21219":"Todd",
+    "21221":"Trigg","21223":"Trimble","21225":"Union","21227":"Warren","21229":"Washington",
+    "21231":"Wayne","21233":"Webster","21235":"Whitley","21237":"Wolfe","21239":"Woodford",
+}
 
 # ─────────────────────────────────────────────
 # COUNTY → PAGE-ID MAPPING  (alphabetical, IDs 3-122)
@@ -194,82 +212,49 @@ COUNTY_DEMOS = {
 # ─────────────────────────────────────────────
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-def extract_votes(text, pattern):
-    """Extract integer vote count from text using a search pattern."""
-    m = re.search(rf'{pattern}\s*\n?\s*(\d[\d,]*)', text, re.IGNORECASE)
-    return int(m.group(1).replace(',', '')) if m else 0
-
-def parse_page(html, county_name):
-    """
-    Parse a county (or statewide) results page.
-    Returns dict with: am, cb, other (vote counts), pct_reporting, total, complete
-    """
-    soup = BeautifulSoup(html, 'html.parser')
-    full_text = soup.get_text('\n')
-
-    # ── Precincts / reporting percentage ─────────
-    pct_reporting = 0.0
-    complete = False
-    no_data = False
-
-    # Grab "Ballots Cast" from page header — this updates live as precincts report in
-    ballots_cast_match = re.search(r'Ballots\s+Cast[^\d]*([\d,]+)', full_text, re.IGNORECASE)
-    ballots_cast = int(ballots_cast_match.group(1).replace(',', '')) if ballots_cast_match else 0
-
-    # Participating / Reporting precincts for complete flag
-    participating = re.search(r'Participating[:\s]+(\d+)', full_text)
-    reporting_num = re.search(r'Reporting[:\s]+(\d+)', full_text)
-    if participating and reporting_num:
-        p = int(participating.group(1))
-        r = int(reporting_num.group(1))
-        complete = (p > 0 and r >= p)
-    else:
-        no_data = ballots_cast == 0
-
-    # ── DEM US Senate votes ───────────────────────
-    votes = {}
-    for pattern, label in CANDIDATES:
-        m = re.search(rf'{pattern}\s*\n?\s*(\d[\d,]*)', full_text, re.IGNORECASE)
-        votes[label] = int(m.group(1).replace(',', '')) if m else 0
-
-    total = sum(votes.values())
-
-    # % reporting = candidate votes counted so far ÷ ballots cast
-    if ballots_cast > 0:
-        pct_reporting = round(total / ballots_cast * 100, 1)
-    else:
-        pct_reporting = 0.0
-
-    result = {
-        "county": county_name,
-        "total": total,
-        "pct_reporting": pct_reporting,
-        "complete": complete,
-        "no_data": no_data,
-    }
-    result.update(votes)
-    return result
-
-def fetch_county(county_name, county_id):
-    try:
-        url = f"{BASE_URL}/County?id={county_id}"
-        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        return parse_page(r.text, county_name)
-    except Exception as e:
-        row = {"county": county_name, "total": 0, "pct_reporting": 0,
-               "complete": False, "no_data": True, "error": str(e)}
-        row.update({k: 0 for k in CAND_KEYS})
-        return row
-
 @st.cache_data(ttl=AUTO_REFRESH)
 def fetch_all_counties():
+    """Single JSON fetch from NPR/AP — replaces 120 individual SoS page fetches."""
+    try:
+        r = requests.get(COUNTIES_URL, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        data = r.json()
+        race = data["races"][0]
+    except Exception as e:
+        st.error(f"Failed to fetch NPR data: {e}")
+        return {}
+
     results = {}
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(fetch_county, name, cid): name
-                   for name, cid in COUNTY_IDS.items()}
-        for future in as_completed(futures):
-            row = future.result()
-            results[row["county"]] = row
+    for county_result in race.get("results", []):
+        fips = county_result.get("fips", "")
+        county_name = KY_FIPS.get(fips)
+        if not county_name:
+            continue
+
+        # Match candidates by last name
+        votes = {k: 0 for k in CAND_KEYS}
+        for cand in county_result.get("candidates", []):
+            last = cand.get("last", "")
+            for key in CAND_KEYS:
+                if key.lower() == last.lower():
+                    votes[key] = cand.get("votes", 0)
+                    break
+
+        total        = county_result.get("total", sum(votes.values()))
+        pct_rep      = round(county_result.get("reportingPercentage", 0.0), 1)
+        precincts    = county_result.get("precincts", 0)
+        reporting    = county_result.get("reporting", 0)
+        complete     = (precincts > 0 and reporting >= precincts)
+
+        row = {
+            "county": county_name,
+            "total": total,
+            "pct_reporting": pct_rep,
+            "complete": complete,
+            "no_data": total == 0,
+        }
+        row.update(votes)
+        results[county_name] = row
+
     return results
 
 # ─────────────────────────────────────────────
